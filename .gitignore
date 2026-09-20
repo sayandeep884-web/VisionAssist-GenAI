@@ -6,3 +6,4 @@ __pycache__/
 .idea/
 models/*.pt
 *.log
+test_image.jpg
