@@ -7,3 +7,6 @@ __pycache__/
 models/*.pt
 *.log
 test_image.jpg
+computer_vision/models/
+midas_depth_result.jpg
+test_image*.jpg

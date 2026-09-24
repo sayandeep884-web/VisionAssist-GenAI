@@ -5,7 +5,7 @@ model = YOLO("models/yolo11n.pt")
 
 
 def detect_objects(image_path):
-    results = model(image_path)
+    results = model(image_path, verbose=False , conf=0.50)
 
     detections = []
 

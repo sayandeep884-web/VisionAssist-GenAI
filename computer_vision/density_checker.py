@@ -26,22 +26,33 @@ def calculate_near_field_ratio(depth_map, near_threshold=0.35):
     return near_ratio
 
 
-def classify_scene(depth_map, crowded_threshold=0.45):
+def classify_scene(depth_map, detections, crowded_threshold=0.45):
     """
-    Classify the scene as normal or crowded.
-
-    This is a prototype heuristic.
-    The threshold must later be tuned using real test scenes.
+    Classify the scene using both MiDaS depth and YOLO detections.
     """
 
     near_ratio = calculate_near_field_ratio(depth_map)
 
-    if near_ratio >= crowded_threshold:
+    # Count people detected by YOLO
+    person_count = sum(
+        1 for detection in detections
+        if detection["object"] == "person"
+    )
+
+    # A scene with several people is considered crowded
+    if person_count >= 3:
         scene_type = "crowded"
+
+    # Otherwise, use near-field information only when
+    # multiple objects are present.
+    elif near_ratio >= crowded_threshold and len(detections) >= 3:
+        scene_type = "crowded"
+
     else:
         scene_type = "normal"
 
     return {
         "scene_type": scene_type,
-        "near_ratio": round(float(near_ratio), 3)
+        "near_ratio": round(float(near_ratio), 3),
+        "person_count": person_count
     }
