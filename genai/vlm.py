@@ -1,5 +1,6 @@
 import subprocess
 import cv2
+import re
 
 from genai.tts import speak
 
@@ -9,39 +10,50 @@ from computer_vision.density_checker import classify_scene
 from computer_vision.navigation import make_navigation_decision
 
 
-OLLAMA_PATH = r"C:\Users\Sayandeep\AppData\Local\Programs\Ollama\ollama.exe"
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+OLLAMA_PATH = (
+    r"C:\Users\Sayandeep\AppData\Local\Programs\Ollama\ollama.exe"
+)
+
 MODEL_NAME = "moondream:latest"
 
 
+# ============================================================
+# OBJECT POSITION
+# ============================================================
+
 def get_object_position(box, image_width):
-    """
-    Estimate whether an object is on the left, center, or right.
-    Uses the actual image width.
-    """
 
     x1, y1, x2, y2 = box
 
     center_x = (x1 + x2) / 2
 
     if center_x < image_width / 3:
+
         return "left"
 
     elif center_x < (2 * image_width / 3):
+
         return "center"
 
     else:
+
         return "right"
 
 
+# ============================================================
+# BUILD NAVIGATION CONTEXT
+# ============================================================
+
 def build_navigation_context(image_path, detections):
-    """
-    Convert YOLO detections into structured information
-    for the VLM.
-    """
 
     image = cv2.imread(image_path)
 
     if image is None:
+
         raise FileNotFoundError(
             f"Could not load image: {image_path}"
         )
@@ -64,7 +76,11 @@ def build_navigation_context(image_path, detections):
         )
 
     if not objects:
-        return "No objects were confidently detected by the object detector."
+
+        return (
+            "No objects were confidently detected "
+            "by the object detector."
+        )
 
     return "\n".join(
         f"- {obj}"
@@ -72,10 +88,11 @@ def build_navigation_context(image_path, detections):
     )
 
 
+# ============================================================
+# ASK VLM
+# ============================================================
+
 def ask_vlm(image_path, prompt):
-    """
-    Send image and grounded prompt to Moondream.
-    """
 
     command = [
         OLLAMA_PATH,
@@ -94,6 +111,7 @@ def ask_vlm(image_path, prompt):
     )
 
     if result.returncode != 0:
+
         raise RuntimeError(
             f"Ollama error:\n{result.stderr}"
         )
@@ -101,40 +119,11 @@ def ask_vlm(image_path, prompt):
     return result.stdout.strip()
 
 
-def validate_vlm_response(response, detections, image_width):
-    """
-    Validate the VLM response against verified YOLO objects
-    and their positions.
-    """
-
-    response_lower = response.lower()
-
-    for detection in detections:
-
-        object_name = detection["object"].lower()
-
-        position = get_object_position(
-            detection["box"],
-            image_width
-        )
-
-        object_found = object_name in response_lower
-
-        position_found = position in response_lower
-
-        if object_found and position_found:
-            return True
-
-    return False
-
+# ============================================================
+# DETERMINISTIC SAFETY RESPONSE
+# ============================================================
 
 def get_safety_response(navigation):
-    """
-    Generate a deterministic safety instruction from the
-    verified navigation decision.
-
-    The safety layer has priority over the VLM.
-    """
 
     direction = navigation["direction"]
 
@@ -144,227 +133,461 @@ def get_safety_response(navigation):
 
     elif direction == "right":
 
-        return "Obstacle on the left. Move right carefully."
+        return (
+            "Obstacle on the left. "
+            "Move right carefully."
+        )
 
     elif direction == "left":
 
-        return "Obstacle on the right. Move left carefully."
+        return (
+            "Obstacle on the right. "
+            "Move left carefully."
+        )
 
     elif direction == "forward":
 
-        return "Path ahead is clear. Continue forward carefully."
+        return (
+            "Path ahead is clear. "
+            "Continue forward carefully."
+        )
 
     return "Proceed carefully."
 
 
-if __name__ == "__main__":
+# ============================================================
+# VALIDATE VLM RESPONSE
+# ============================================================
 
-    image_path = "camera_frame.jpg"
+def validate_vlm_response(
+    response,
+    target_object,
+    target_position,
+    target_direction
+):
 
-    image = cv2.imread(image_path)
+    response_lower = response.lower().strip()
 
-    if image is None:
-        raise FileNotFoundError(
-            f"Could not load image: {image_path}"
+
+    # --------------------------------------------------------
+    # OBJECT CHECK
+    # --------------------------------------------------------
+
+    object_found = (
+        target_object.lower()
+        in response_lower
+    )
+
+
+    # --------------------------------------------------------
+    # POSITION CHECK
+    #
+    # We specifically look for phrases describing
+    # WHERE THE OBJECT IS.
+    #
+    # Example:
+    # "chair is on the left"
+    #
+    # We do NOT count:
+    # "move left"
+    # --------------------------------------------------------
+
+    if target_position == "left":
+
+        position_pattern = (
+            r"(?:on|to|at)\s+the\s+left"
+            r"|(?:on|to|at)\s+left"
+            r"|object\s+is\s+left"
+            r"|object\s+on\s+left"
         )
 
-    image_width = image.shape[1]
+        opposite_position_pattern = (
+            r"(?:on|to|at)\s+the\s+right"
+            r"|(?:on|to|at)\s+right"
+            r"|object\s+is\s+right"
+            r"|object\s+on\s+right"
+        )
 
-    # -----------------------------------
-    # 1. Estimate depth using MiDaS
-    # -----------------------------------
 
-    depth_map = estimate_depth(image_path)
+    elif target_position == "right":
 
-    # -----------------------------------
-    # 2. Detect objects using YOLO
-    # -----------------------------------
+        position_pattern = (
+            r"(?:on|to|at)\s+the\s+right"
+            r"|(?:on|to|at)\s+right"
+            r"|object\s+is\s+right"
+            r"|object\s+on\s+right"
+        )
 
-    detections = detect_objects(image_path)
+        opposite_position_pattern = (
+            r"(?:on|to|at)\s+the\s+left"
+            r"|(?:on|to|at)\s+left"
+            r"|object\s+is\s+left"
+            r"|object\s+on\s+left"
+        )
 
-    # -----------------------------------
-    # 3. Classify scene
-    # -----------------------------------
+
+    else:
+
+        # Center is slightly different.
+        position_pattern = (
+            r"(?:in|at)\s+the\s+center"
+            r"|(?:in|at)\s+center"
+            r"|ahead"
+            r"|in\s+front"
+        )
+
+        opposite_position_pattern = (
+            r"on\s+the\s+left"
+            r"|on\s+the\s+right"
+        )
+
+
+    position_found = bool(
+        re.search(
+            position_pattern,
+            response_lower
+        )
+    )
+
+
+    # --------------------------------------------------------
+    # Check whether VLM explicitly gives the WRONG
+    # object position.
+    # --------------------------------------------------------
+
+    opposite_position_found = bool(
+        re.search(
+            opposite_position_pattern,
+            response_lower
+        )
+    )
+
+
+    # --------------------------------------------------------
+    # MOVEMENT DIRECTION
+    #
+    # IMPORTANT:
+    #
+    # "move left" means navigation direction.
+    #
+    # "chair is on the left" means object position.
+    # --------------------------------------------------------
+
+    if target_direction == "left":
+
+        direction_pattern = (
+            r"move\s+left"
+            r"|go\s+left"
+            r"|turn\s+left"
+            r"|keep\s+left"
+        )
+
+    elif target_direction == "right":
+
+        direction_pattern = (
+            r"move\s+right"
+            r"|go\s+right"
+            r"|turn\s+right"
+            r"|keep\s+right"
+        )
+
+    else:
+
+        direction_pattern = (
+            r"continue"
+            r"|go\s+forward"
+            r"|move\s+forward"
+            r"|proceed"
+        )
+
+
+    direction_found = bool(
+        re.search(
+            direction_pattern,
+            response_lower
+        )
+    )
+
+
+    # --------------------------------------------------------
+    # FINAL VALIDATION
+    # --------------------------------------------------------
+
+    valid = (
+        object_found
+        and position_found
+        and not opposite_position_found
+        and direction_found
+    )
+
+
+    # --------------------------------------------------------
+    # DEBUG INFORMATION
+    # --------------------------------------------------------
+
+    print("\nVLM Validation")
+    print("-----------------------")
+
+    print(
+        "Object found:",
+        object_found
+    )
+
+    print(
+        "Correct position found:",
+        position_found
+    )
+
+    print(
+        "Wrong position found:",
+        opposite_position_found
+    )
+
+    print(
+        "Correct direction found:",
+        direction_found
+    )
+
+    print(
+        "Final validation:",
+        valid
+    )
+
+
+    return valid
+
+
+# ============================================================
+# TEST
+# ============================================================
+
+if __name__ == "__main__":
+
+    image_path = "test_image.jpg"
+
+
+    print(
+        "Testing VisionAssist VLM..."
+    )
+
+
+    detections = detect_objects(
+        image_path
+    )
+
+
+    depth_map = estimate_depth(
+        image_path
+    )
+
 
     scene_info = classify_scene(
         depth_map,
         detections
     )
 
-    # -----------------------------------
-    # 4. Make navigation decision
-    # -----------------------------------
 
     navigation = make_navigation_decision(
         detections,
         depth_map
     )
 
-    print("\nNavigation Decision")
-    print("-----------------------")
-    print("Direction:", navigation["direction"])
-    print("Urgency:", navigation["urgency"])
-    print("Reason:", navigation["reason"])
 
-    # -----------------------------------
-    # 5. Display scene information
-    # -----------------------------------
+    print("\nDetections:")
+    print(detections)
 
-    print("\nScene Information")
-    print("-----------------------")
-    print("Scene type:", scene_info["scene_type"])
-    print("Near-field ratio:", scene_info["near_ratio"])
 
-    # -----------------------------------
-    # 6. Build verified YOLO information
-    # -----------------------------------
+    print("\nScene:")
+    print(scene_info)
 
-    detected_objects = build_navigation_context(
-        image_path,
-        detections
-    )
 
-    # -----------------------------------
-    # 7. Create VLM prompt
-    # -----------------------------------
+    print("\nNavigation:")
+    print(navigation)
 
-    if scene_info["scene_type"] == "crowded":
 
-        prompt = f"""
-You are VisionAssist, an assistive navigation assistant for a
-visually impaired person.
-
-The computer vision safety system has analyzed the scene.
-
-Verified navigation decision:
-Direction: {navigation["direction"]}
-Urgency: {navigation["urgency"]}
-Reason: {navigation["reason"]}
-
-The scene is classified as CROWDED.
-
-Give ONE short spoken navigation instruction.
-
-Rules:
-1. Follow the verified navigation decision.
-2. Do not invent objects.
-3. Do not invent distances.
-4. Do not mention confidence scores.
-5. Do not contradict the navigation decision.
-6. Use simple language suitable for speech.
-7. Output ONLY one short sentence.
-
-If the verified direction is STOP, clearly tell the user to stop.
-
-Example:
-"A person is on the left. Move right carefully."
-"""
-
-    else:
-
-        prompt = f"""
-You are VisionAssist, an assistive navigation assistant for a
-visually impaired person.
-
-The computer vision safety system has analyzed the scene.
-
-Verified information:
-{detected_objects}
-
-Verified navigation decision:
-Direction: {navigation["direction"]}
-Urgency: {navigation["urgency"]}
-Reason: {navigation["reason"]}
-
-Give ONE short spoken navigation instruction.
-
-Rules:
-1. Follow the verified navigation decision.
-2. Do not invent objects.
-3. Do not invent distances.
-4. Do not mention confidence scores.
-5. Do not contradict the navigation decision.
-6. Use simple language suitable for speech.
-7. Output ONLY one short sentence.
-8. If the verified direction is STOP, clearly tell the user to stop.
-
-Examples:
-"A person is on the left. Move right carefully."
-"A person is on the right. Move left carefully."
-"An obstacle is ahead. Stop."
-"The path ahead is clear. Continue forward."
-"""
-
-    # -----------------------------------
-    # 8. Send prompt to VLM
-    # -----------------------------------
-
-    print("\nPrompt sent to VLM")
-    print("-----------------------")
-    print(prompt)
-
-    # -----------------------------------
-    # 9. Generate response
-    # -----------------------------------
+    # ========================================================
+    # NO OBJECT
+    # ========================================================
 
     if not detections:
 
-        response = (
-            "No verified obstacle detected ahead. "
-            "Proceed carefully."
+        response = get_safety_response(
+            navigation
         )
+
+        print("\nResponse:")
+        print(response)
+
+
+    # ========================================================
+    # STOP
+    # ========================================================
+
+    elif navigation["direction"] == "stop":
+
+        response = get_safety_response(
+            navigation
+        )
+
+        print("\nResponse:")
+        print(response)
+
+
+    # ========================================================
+    # VLM
+    # ========================================================
 
     else:
 
-        # -----------------------------------
-        # Safety override
-        # -----------------------------------
-        # The deterministic navigation system
-        # always has priority over the VLM.
+        target_object = navigation[
+            "closest_object"
+        ]
 
-        if navigation["direction"] == "stop":
+
+        target_detection = None
+
+
+        for detection in detections:
+
+            if detection["object"] == target_object:
+
+                target_detection = detection
+
+                break
+
+
+        if target_detection is None:
 
             response = get_safety_response(
                 navigation
             )
 
+
         else:
+
+            target_position = target_detection[
+                "position"
+            ]
+
+
+            target_direction = navigation[
+                "direction"
+            ]
+
+
+            # =================================================
+            # PROMPT
+            # =================================================
+
+            prompt = f"""
+You are VisionAssist, an assistive navigation
+assistant for a visually impaired person.
+
+The computer vision system has already verified
+the following information.
+
+TARGET OBJECT:
+{target_object}
+
+TARGET POSITION:
+{target_position}
+
+VERIFIED MOVEMENT DIRECTION:
+{target_direction}
+
+VERIFIED URGENCY:
+{navigation["urgency"]}
+
+VERIFIED REASON:
+{navigation["reason"]}
+
+Generate ONE short spoken navigation sentence.
+
+STRICT RULES:
+
+1. Mention ONLY the target object.
+2. State the object's position correctly.
+3. The object's position is {target_position}.
+4. The required movement direction is {target_direction}.
+5. Do not confuse object position with movement direction.
+6. Never say the object is on the opposite side.
+7. Do not invent distance.
+8. Do not mention confidence.
+9. Do not mention other objects.
+10. Output only one short sentence.
+
+The expected structure is:
+
+"The {target_object} is on the {target_position}. Move {target_direction} carefully."
+
+Follow the verified information exactly.
+"""
+
+
+            print("\nTarget Object")
+            print("-----------------------")
+
+            print(
+                "Object:",
+                target_object
+            )
+
+            print(
+                "Position:",
+                target_position
+            )
+
+            print(
+                "Direction:",
+                target_direction
+            )
+
+
+            print("\nPrompt sent to VLM")
+            print("-----------------------")
+
+            print(prompt)
+
+
+            # =================================================
+            # CALL VLM
+            # =================================================
 
             response = ask_vlm(
                 image_path,
                 prompt
             )
 
-            # -----------------------------------
-            # 10. Validate normal-scene response
-            # -----------------------------------
 
-            if scene_info["scene_type"] == "normal":
+            # =================================================
+            # VALIDATE
+            # =================================================
 
-                if not validate_vlm_response(
-                    response,
-                    detections,
-                    image_width
-                ):
+            valid_response = validate_vlm_response(
+                response,
+                target_object,
+                target_position,
+                target_direction
+            )
 
-                    response = get_safety_response(
-                        navigation
-                    )
 
-    # -----------------------------------
-    # 11. Display final information
-    # -----------------------------------
+            if not valid_response:
 
-    print("\nVerified YOLO Information")
-    print("-----------------------")
-    print(detected_objects)
+                print(
+                    "\nVLM validation failed."
+                )
 
-    print("\nVisionAssist VLM Response")
-    print("-----------------------")
-    print(response)
+                print(
+                    "Using deterministic safety response."
+                )
 
-    # -----------------------------------
-    # 12. Speak response
-    # -----------------------------------
+                response = get_safety_response(
+                    navigation
+                )
 
-    speak(response)
+
+            print("\nFinal Response:")
+            print(response)
+
+
+            speak(response)

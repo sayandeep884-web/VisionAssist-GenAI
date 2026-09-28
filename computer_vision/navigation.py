@@ -2,8 +2,6 @@ import numpy as np
 
 
 def get_object_depth(depth_map, box):
-    """Estimate relative depth at the center of a detected object."""
-
     x1, y1, x2, y2 = map(int, box)
 
     center_x = (x1 + x2) // 2
@@ -21,13 +19,10 @@ def get_object_depth(depth_map, box):
 
 
 def find_closest_object(detections, depth_map):
-    """Find the detected object with the highest relative depth."""
-
     closest_object = None
     highest_depth = -float("inf")
 
     for detection in detections:
-
         depth = get_object_depth(
             depth_map,
             detection["box"]
@@ -35,14 +30,17 @@ def find_closest_object(detections, depth_map):
 
         if depth is not None and depth > highest_depth:
             highest_depth = depth
+
+            # Keep the COMPLETE detection
             closest_object = detection.copy()
+
+            # Add depth to that exact detection
             closest_object["depth"] = depth
 
     return closest_object
 
 
 def get_direction(closest_object):
-
     if closest_object is None:
         return "forward"
 
@@ -59,14 +57,11 @@ def get_direction(closest_object):
 
 
 def get_urgency(closest_object):
-
     if closest_object is None:
         return "low"
 
     depth = closest_object["depth"]
 
-    # Prototype thresholds.
-    # MiDaS gives relative depth, not real distance.
     if depth > 700:
         return "high"
 
@@ -83,31 +78,40 @@ def make_navigation_decision(detections, depth_map):
         return {
             "direction": "forward",
             "urgency": "low",
-            "reason": "no obstacle detected"
+            "reason": "no obstacle detected",
+            "closest_object": None
         }
 
+    # Find the exact closest detection
     closest_object = find_closest_object(
         detections,
         depth_map
     )
 
-    direction = get_direction(closest_object)
+    direction = get_direction(
+        closest_object
+    )
 
-    urgency = get_urgency(closest_object)
+    urgency = get_urgency(
+        closest_object
+    )
 
     if direction == "stop":
+
         reason = (
             f"{closest_object['object']} "
             "detected ahead"
         )
 
     elif direction == "right":
+
         reason = (
             f"{closest_object['object']} "
             "detected on the left"
         )
 
     else:
+
         reason = (
             f"{closest_object['object']} "
             "detected on the right"
@@ -117,6 +121,16 @@ def make_navigation_decision(detections, depth_map):
         "direction": direction,
         "urgency": urgency,
         "reason": reason,
+
+        # Object name
         "closest_object": closest_object["object"],
-        "depth": round(closest_object["depth"], 2)
+
+        # IMPORTANT:
+        # Return the exact detection selected
+        "closest_detection": closest_object,
+
+        "depth": round(
+            closest_object["depth"],
+            2
+        )
     }
