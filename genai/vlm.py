@@ -128,6 +128,35 @@ def validate_vlm_response(response, detections, image_width):
     return False
 
 
+def get_safety_response(navigation):
+    """
+    Generate a deterministic safety instruction from the
+    verified navigation decision.
+
+    The safety layer has priority over the VLM.
+    """
+
+    direction = navigation["direction"]
+
+    if direction == "stop":
+
+        return "Obstacle ahead. Stop."
+
+    elif direction == "right":
+
+        return "Obstacle on the left. Move right carefully."
+
+    elif direction == "left":
+
+        return "Obstacle on the right. Move left carefully."
+
+    elif direction == "forward":
+
+        return "Path ahead is clear. Continue forward carefully."
+
+    return "Proceed carefully."
+
+
 if __name__ == "__main__":
 
     image_path = "camera_frame.jpg"
@@ -225,6 +254,8 @@ Rules:
 6. Use simple language suitable for speech.
 7. Output ONLY one short sentence.
 
+If the verified direction is STOP, clearly tell the user to stop.
+
 Example:
 "A person is on the left. Move right carefully."
 """
@@ -255,11 +286,12 @@ Rules:
 5. Do not contradict the navigation decision.
 6. Use simple language suitable for speech.
 7. Output ONLY one short sentence.
+8. If the verified direction is STOP, clearly tell the user to stop.
 
 Examples:
 "A person is on the left. Move right carefully."
 "A person is on the right. Move left carefully."
-"An obstacle is ahead. Stop and proceed carefully."
+"An obstacle is ahead. Stop."
 "The path ahead is clear. Continue forward."
 """
 
@@ -284,41 +316,40 @@ Examples:
 
     else:
 
-        response = ask_vlm(
-            image_path,
-            prompt
-        )
-
         # -----------------------------------
-        # 10. Validate normal-scene response
+        # Safety override
         # -----------------------------------
+        # The deterministic navigation system
+        # always has priority over the VLM.
 
-        if scene_info["scene_type"] == "normal":
+        if navigation["direction"] == "stop":
 
-            if not validate_vlm_response(
-                response,
-                detections,
-                image_width
-            ):
+            response = get_safety_response(
+                navigation
+            )
 
-                position = get_object_position(
-                    detections[0]["box"],
+        else:
+
+            response = ask_vlm(
+                image_path,
+                prompt
+            )
+
+            # -----------------------------------
+            # 10. Validate normal-scene response
+            # -----------------------------------
+
+            if scene_info["scene_type"] == "normal":
+
+                if not validate_vlm_response(
+                    response,
+                    detections,
                     image_width
-                )
+                ):
 
-                if position == "left":
-                    position_text = "on the left"
-
-                elif position == "center":
-                    position_text = "ahead in the center"
-
-                else:
-                    position_text = "on the right"
-
-                response = (
-                    f"A {detections[0]['object']} is "
-                    f"{position_text}. Proceed carefully."
-                )
+                    response = get_safety_response(
+                        navigation
+                    )
 
     # -----------------------------------
     # 11. Display final information
