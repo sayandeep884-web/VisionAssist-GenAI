@@ -1,10 +1,12 @@
 import cv2
 import time
+import pyttsx3
 
 from computer_vision.detector import detect_objects
 from computer_vision.midas_depth import estimate_depth
 from computer_vision.density_checker import classify_scene
 from computer_vision.navigation import make_navigation_decision
+from computer_vision.alert_manager import AlertManager
 
 from genai.vlm import (
     ask_vlm,
@@ -13,18 +15,32 @@ from genai.vlm import (
     validate_vlm_response
 )
 
-from genai.tts import speak
+
+# ---------------------------------------------------------
+# TEXT TO SPEECH
+# ---------------------------------------------------------
+
+def speak(text):
+    engine = pyttsx3.init()
+
+    engine.setProperty("rate", 175)
+    engine.setProperty("volume", 1.0)
+
+    engine.say(text)
+    engine.runAndWait()
+
+    engine.stop()
 
 
-# ============================================================
-# ANALYZE ONE CAPTURED FRAME
-# ============================================================
+# ---------------------------------------------------------
+# ANALYZE IMAGE
+# ---------------------------------------------------------
 
-def analyze_frame(image_path):
+def analyze_frame(image_path, alert_manager=None):
 
-    # ========================================================
-    # 1. YOLO OBJECT DETECTION
-    # ========================================================
+    # =====================================================
+    # 1. OBJECT DETECTION
+    # =====================================================
 
     start = time.perf_counter()
 
@@ -33,9 +49,9 @@ def analyze_frame(image_path):
     yolo_time = time.perf_counter() - start
 
 
-    # ========================================================
-    # 2. MiDaS DEPTH ESTIMATION
-    # ========================================================
+    # =====================================================
+    # 2. DEPTH ESTIMATION
+    # =====================================================
 
     start = time.perf_counter()
 
@@ -44,9 +60,9 @@ def analyze_frame(image_path):
     midas_time = time.perf_counter() - start
 
 
-    # ========================================================
+    # =====================================================
     # 3. SCENE CLASSIFICATION
-    # ========================================================
+    # =====================================================
 
     start = time.perf_counter()
 
@@ -58,9 +74,9 @@ def analyze_frame(image_path):
     scene_time = time.perf_counter() - start
 
 
-    # ========================================================
+    # =====================================================
     # 4. NAVIGATION DECISION
-    # ========================================================
+    # =====================================================
 
     start = time.perf_counter()
 
@@ -72,239 +88,160 @@ def analyze_frame(image_path):
     navigation_time = time.perf_counter() - start
 
 
-    # ========================================================
-    # 5. READ IMAGE
-    # ========================================================
-
-    image = cv2.imread(image_path)
-
-    if image is None:
-
-        raise FileNotFoundError(
-            f"Could not load image: {image_path}"
-        )
-
-    image_width = image.shape[1]
-
-
-    # ========================================================
-    # 6. BUILD VERIFIED YOLO CONTEXT
-    # ========================================================
-
-    detected_objects = build_navigation_context(
-        image_path,
-        detections
-    )
-
-
-    # ========================================================
-    # 7. VLM PROCESSING
-    # ========================================================
+    # =====================================================
+    # 5. GENERATE RESPONSE
+    # =====================================================
 
     vlm_time = 0
 
 
-    # --------------------------------------------------------
-    # CASE A: NO OBJECT DETECTED
-    # --------------------------------------------------------
+    # -----------------------------------------------------
+    # CASE 1: NO OBJECT DETECTED
+    # -----------------------------------------------------
 
     if not detections:
-
-        response = (
-            "No verified obstacle detected ahead. "
-            "Proceed carefully."
-        )
-
-
-    # --------------------------------------------------------
-    # CASE B: STOP
-    #
-    # Safety-critical decision.
-    # We don't need VLM here.
-    # --------------------------------------------------------
-
-    elif navigation["direction"] == "stop":
 
         response = get_safety_response(
             navigation
         )
 
 
-    # --------------------------------------------------------
-    # CASE C: LEFT / RIGHT / FORWARD
-    # --------------------------------------------------------
+    # -----------------------------------------------------
+    # CASE 2: OBJECT DIRECTLY AHEAD
+    # -----------------------------------------------------
+
+    elif navigation["direction"] == "stop":
+
+        # Deterministic safety response.
+        # VLM is not used for a direct obstacle ahead.
+
+        response = get_safety_response(
+            navigation
+        )
+
+
+    # -----------------------------------------------------
+    # CASE 3: OBJECT ON LEFT / RIGHT
+    # -----------------------------------------------------
 
     else:
 
-        # ----------------------------------------------------
-        # Find target object
-        # ----------------------------------------------------
+        target_object = navigation[
+            "closest_object"
+        ]
 
-        target_object = navigation["closest_object"]
-        target_detection = navigation["closest_detection"]
+        target_detection = navigation[
+            "closest_detection"
+        ]
+
+        target_position = target_detection[
+            "position"
+        ]
+
+        verified_direction = navigation[
+            "direction"
+        ]
 
 
-        # ----------------------------------------------------
-        # If target cannot be found
-        # ----------------------------------------------------
+        # -------------------------------------------------
+        # VLM PROMPT
+        # -------------------------------------------------
 
-        if target_detection is None:
+        prompt = f"""
+You are a navigation assistant.
+
+Write exactly ONE short sentence for a visually impaired user.
+
+Verified information from the computer vision system:
+
+Object: {target_object}
+Position: {target_position}
+Direction: {verified_direction}
+
+Rules:
+1. Mention the detected object.
+2. Mention its position: left, right, or center.
+3. Tell the user to move in the verified direction.
+4. Use ONLY the verified direction.
+5. Do not invent any object.
+6. Do not change the direction.
+7. Do not explain your answer.
+8. Do not make a list.
+9. Do not repeat these instructions.
+10. Output ONLY the final navigation sentence.
+
+Example:
+"A chair is on the left. Move right carefully."
+
+Now generate the navigation sentence.
+"""
+
+
+        # -------------------------------------------------
+        # ASK LOCAL VLM
+        # -------------------------------------------------
+
+        start = time.perf_counter()
+
+        vlm_response = ask_vlm(
+            image_path,
+            prompt
+        )
+
+        vlm_time = time.perf_counter() - start
+
+
+        # -------------------------------------------------
+        # PRINT RAW VLM RESPONSE
+        # -------------------------------------------------
+
+        print("\nRaw VLM Response")
+        print("-----------------------")
+        print(vlm_response)
+
+
+        # -------------------------------------------------
+        # VALIDATE VLM RESPONSE
+        # -------------------------------------------------
+
+        valid = validate_vlm_response(
+            vlm_response,
+            target_object,
+            target_position,
+            verified_direction
+        )
+
+
+        # -------------------------------------------------
+        # VLM VALIDATION RESULT
+        # -------------------------------------------------
+
+        if valid:
+
+            response = vlm_response
+
+            print(
+                "\nVLM validation successful."
+            )
+
+        else:
+
+            print(
+                "\nVLM validation failed."
+            )
+
+            print(
+                "Using deterministic safety response."
+            )
 
             response = get_safety_response(
                 navigation
             )
 
 
-        else:
-
-            target_position = target_detection[
-                "position"
-            ]
-
-
-            target_direction = navigation[
-                "direction"
-            ]
-
-
-            # =================================================
-            # VLM PROMPT
-            # =================================================
-
-            prompt = f"""
-You are VisionAssist, an assistive navigation
-assistant for a visually impaired person.
-
-The computer vision safety system has already
-selected ONE target object.
-
-TARGET OBJECT:
-{target_object}
-
-TARGET POSITION:
-{target_position}
-
-VERIFIED NAVIGATION DIRECTION:
-{target_direction}
-
-VERIFIED URGENCY:
-{navigation["urgency"]}
-
-VERIFIED REASON:
-{navigation["reason"]}
-
-Your task is to produce ONE short spoken
-navigation instruction.
-
-IMPORTANT RULES:
-
-1. Talk ONLY about the TARGET OBJECT.
-2. Do NOT mention any other detected object.
-3. Do NOT replace the TARGET OBJECT with another object.
-4. Use the TARGET POSITION exactly.
-5. Follow the VERIFIED NAVIGATION DIRECTION exactly.
-6. Do not invent distances.
-7. Do not mention confidence scores.
-8. Do not contradict the navigation decision.
-9. Use simple language suitable for speech.
-10. Output ONLY one short sentence.
-
-Example:
-
-Target object: chair
-Target position: right
-Verified direction: left
-
-Correct:
-"A chair is on the right. Move left carefully."
-
-Incorrect:
-"A chair is on the right. Move right."
-
-Incorrect:
-"A person is on the right."
-
-Incorrect:
-"A chair is on the left."
-"""
-
-
-            # =================================================
-            # PRINT TARGET INFORMATION
-            # =================================================
-
-            print("\nTarget Object")
-            print("-----------------------")
-
-            print(
-                "Object:",
-                target_object
-            )
-
-            print(
-                "Position:",
-                target_position
-            )
-
-            print(
-                "Direction:",
-                target_direction
-            )
-
-
-            print("\nPrompt sent to VLM")
-            print("-----------------------")
-
-            print(prompt)
-
-
-            # =================================================
-            # CALL VLM
-            # =================================================
-
-            start = time.perf_counter()
-
-            response = ask_vlm(
-                image_path,
-                prompt
-            )
-
-            vlm_time = (
-                time.perf_counter()
-                - start
-            )
-
-
-            # =================================================
-            # VALIDATE VLM RESPONSE
-            # =================================================
-
-            valid_response = validate_vlm_response(
-                response,
-                target_object,
-                target_position,
-                target_direction
-            )
-
-
-            if not valid_response:
-
-                print(
-                    "\nVLM validation failed."
-                )
-
-                print(
-                    "Using deterministic safety response."
-                )
-
-                response = get_safety_response(
-                    navigation
-                )
-
-
-    # ========================================================
-    # NAVIGATION RESULT
-    # ========================================================
+    # =====================================================
+    # 6. PRINT NAVIGATION INFORMATION
+    # =====================================================
 
     print("\nNavigation Decision")
     print("-----------------------")
@@ -325,9 +262,9 @@ Incorrect:
     )
 
 
-    # ========================================================
-    # SCENE INFORMATION
-    # ========================================================
+    # =====================================================
+    # 7. PRINT SCENE INFORMATION
+    # =====================================================
 
     print("\nScene Information")
     print("-----------------------")
@@ -348,19 +285,31 @@ Incorrect:
     )
 
 
-    # ========================================================
-    # YOLO INFORMATION
-    # ========================================================
+    # =====================================================
+    # 8. PRINT YOLO INFORMATION
+    # =====================================================
 
     print("\nVerified YOLO Information")
     print("-----------------------")
 
-    print(detected_objects)
+    if detections:
+
+        for detection in detections:
+
+            print(
+                f'- {detection["object"]} '
+                f'(confidence {detection["confidence"]}, '
+                f'{detection["position"]})'
+            )
+
+    else:
+
+        print("- No objects detected")
 
 
-    # ========================================================
-    # FINAL RESPONSE
-    # ========================================================
+    # =====================================================
+    # 9. PRINT FINAL RESPONSE
+    # =====================================================
 
     print("\nVisionAssist Response")
     print("-----------------------")
@@ -368,9 +317,33 @@ Incorrect:
     print(response)
 
 
-    # ========================================================
-    # LATENCY CALCULATION
-    # ========================================================
+    # =====================================================
+    # 10. ALERT MANAGER + TTS
+    # =====================================================
+
+    if (
+        alert_manager is None
+        or alert_manager.should_alert(navigation)
+    ):
+
+        start = time.perf_counter()
+
+        speak(response)
+
+        tts_time = time.perf_counter() - start
+
+    else:
+
+        print(
+            "\nAlert Manager: speech suppressed."
+        )
+
+        tts_time = 0
+
+
+    # =====================================================
+    # 11. PERFORMANCE
+    # =====================================================
 
     total_ai_time = (
         yolo_time
@@ -378,6 +351,11 @@ Incorrect:
         + scene_time
         + navigation_time
         + vlm_time
+    )
+
+    total_time = (
+        total_ai_time
+        + tts_time
     )
 
 
@@ -416,21 +394,6 @@ Incorrect:
         f"{total_ai_time:.3f} s"
     )
 
-
-    # ========================================================
-    # TEXT TO SPEECH
-    # ========================================================
-
-    start = time.perf_counter()
-
-    speak(response)
-
-    tts_time = (
-        time.perf_counter()
-        - start
-    )
-
-
     print(
         f"TTS                  : "
         f"{tts_time:.3f} s"
@@ -440,23 +403,16 @@ Incorrect:
 
     print(
         f"Total End-to-End     : "
-        f"{total_ai_time + tts_time:.3f} s"
+        f"{total_time:.3f} s"
     )
 
-
-# ============================================================
+# ---------------------------------------------------------
 # MAIN CAMERA LOOP
-# ============================================================
+# ---------------------------------------------------------
 
 def main():
 
-    # ========================================================
-    # CAMERA
-    # ========================================================
-
-    # 1 = DroidCam / phone camera
     camera = cv2.VideoCapture(1)
-
 
     if not camera.isOpened():
 
@@ -465,6 +421,15 @@ def main():
         )
 
         return
+
+
+    # -----------------------------------------------------
+    # ALERT MANAGER
+    # -----------------------------------------------------
+
+    alert_manager = AlertManager(
+        cooldown=3.0
+    )
 
 
     print(
@@ -480,9 +445,9 @@ def main():
     )
 
 
-    # ========================================================
-    # LIVE CAMERA LOOP
-    # ========================================================
+    # -----------------------------------------------------
+    # CAMERA LOOP
+    # -----------------------------------------------------
 
     while True:
 
@@ -498,56 +463,38 @@ def main():
             break
 
 
-        # ----------------------------------------------------
-        # Show live camera
-        # ----------------------------------------------------
-
         cv2.imshow(
             "VisionAssist Camera",
             frame
         )
 
 
-        # ----------------------------------------------------
-        # Read keyboard
-        # ----------------------------------------------------
-
         key = cv2.waitKey(1) & 0xFF
 
 
-        # ----------------------------------------------------
-        # Q = Quit
-        # ----------------------------------------------------
-
-        if key == ord("q"):
-
-            break
-
-
-        # ----------------------------------------------------
-        # SPACE = Capture
-        # ----------------------------------------------------
+        # -------------------------------------------------
+        # SPACE = CAPTURE IMAGE
+        # -------------------------------------------------
 
         if key == 32:
-
-            print(
-                "\nImage captured."
-            )
-
 
             image_path = "camera_frame.jpg"
 
 
-            # Save current frame
             cv2.imwrite(
                 image_path,
                 frame
             )
 
 
-            # Analyze frame
+            print(
+                "\nImage captured."
+            )
+
+
             analyze_frame(
-                image_path
+                image_path,
+                alert_manager
             )
 
 
@@ -556,18 +503,27 @@ def main():
             )
 
 
-    # ========================================================
-    # CLEANUP
-    # ========================================================
+        # -------------------------------------------------
+        # Q = QUIT
+        # -------------------------------------------------
+
+        elif key == ord("q"):
+
+            break
+
+
+    # -----------------------------------------------------
+    # RELEASE CAMERA
+    # -----------------------------------------------------
 
     camera.release()
 
     cv2.destroyAllWindows()
 
 
-# ============================================================
+# ---------------------------------------------------------
 # PROGRAM ENTRY POINT
-# ============================================================
+# ---------------------------------------------------------
 
 if __name__ == "__main__":
 
