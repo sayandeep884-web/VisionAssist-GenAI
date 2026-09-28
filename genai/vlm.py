@@ -1,10 +1,12 @@
 import subprocess
 import cv2
+
 from genai.tts import speak
 
 from computer_vision.detector import detect_objects
 from computer_vision.midas_depth import estimate_depth
 from computer_vision.density_checker import classify_scene
+from computer_vision.navigation import make_navigation_decision
 
 
 OLLAMA_PATH = r"C:\Users\Sayandeep\AppData\Local\Programs\Ollama\ollama.exe"
@@ -30,9 +32,10 @@ def get_object_position(box, image_width):
     else:
         return "right"
 
-def build_navigation_context(image_path , detections):
+
+def build_navigation_context(image_path, detections):
     """
-    Run YOLO and convert detections into structured information
+    Convert YOLO detections into structured information
     for the VLM.
     """
 
@@ -97,6 +100,7 @@ def ask_vlm(image_path, prompt):
 
     return result.stdout.strip()
 
+
 def validate_vlm_response(response, detections, image_width):
     """
     Validate the VLM response against verified YOLO objects
@@ -114,10 +118,8 @@ def validate_vlm_response(response, detections, image_width):
             image_width
         )
 
-        # Check whether the verified object is mentioned
         object_found = object_name in response_lower
 
-        # Check whether the verified position is mentioned
         position_found = position in response_lower
 
         if object_found and position_found:
@@ -128,7 +130,7 @@ def validate_vlm_response(response, detections, image_width):
 
 if __name__ == "__main__":
 
-    image_path = "test_image2.jpg"
+    image_path = "camera_frame.jpg"
 
     image = cv2.imread(image_path)
 
@@ -139,28 +141,63 @@ if __name__ == "__main__":
 
     image_width = image.shape[1]
 
-    # Estimate scene depth using MiDaS
+    # -----------------------------------
+    # 1. Estimate depth using MiDaS
+    # -----------------------------------
+
     depth_map = estimate_depth(image_path)
 
-    # Get verified object information from YOLO
+    # -----------------------------------
+    # 2. Detect objects using YOLO
+    # -----------------------------------
+
     detections = detect_objects(image_path)
 
-    # Classify scene using both depth and YOLO
+    # -----------------------------------
+    # 3. Classify scene
+    # -----------------------------------
+
     scene_info = classify_scene(
         depth_map,
         detections
     )
+
+    # -----------------------------------
+    # 4. Make navigation decision
+    # -----------------------------------
+
+    navigation = make_navigation_decision(
+        detections,
+        depth_map
+    )
+
+    print("\nNavigation Decision")
+    print("-----------------------")
+    print("Direction:", navigation["direction"])
+    print("Urgency:", navigation["urgency"])
+    print("Reason:", navigation["reason"])
+
+    # -----------------------------------
+    # 5. Display scene information
+    # -----------------------------------
 
     print("\nScene Information")
     print("-----------------------")
     print("Scene type:", scene_info["scene_type"])
     print("Near-field ratio:", scene_info["near_ratio"])
 
-    # Get verified object information from YOLO
+    # -----------------------------------
+    # 6. Build verified YOLO information
+    # -----------------------------------
+
     detected_objects = build_navigation_context(
         image_path,
         detections
     )
+
+    # -----------------------------------
+    # 7. Create VLM prompt
+    # -----------------------------------
 
     if scene_info["scene_type"] == "crowded":
 
@@ -168,23 +205,28 @@ if __name__ == "__main__":
 You are VisionAssist, an assistive navigation assistant for a
 visually impaired person.
 
-The scene has been classified as CROWDED by the computer vision system.
+The computer vision safety system has analyzed the scene.
 
-Verified information:
-{detected_objects}
+Verified navigation decision:
+Direction: {navigation["direction"]}
+Urgency: {navigation["urgency"]}
+Reason: {navigation["reason"]}
 
-Give ONE short general safety instruction for a crowded environment.
+The scene is classified as CROWDED.
+
+Give ONE short spoken navigation instruction.
 
 Rules:
-1. Do not mention specific objects.
+1. Follow the verified navigation decision.
 2. Do not invent objects.
 3. Do not invent distances.
 4. Do not mention confidence scores.
-5. Use simple language suitable for speech.
-6. Output ONLY one short sentence.
+5. Do not contradict the navigation decision.
+6. Use simple language suitable for speech.
+7. Output ONLY one short sentence.
 
 Example:
-"The area ahead is crowded, so proceed carefully."
+"A person is on the left. Move right carefully."
 """
 
     else:
@@ -193,47 +235,72 @@ Example:
 You are VisionAssist, an assistive navigation assistant for a
 visually impaired person.
 
+The computer vision safety system has analyzed the scene.
+
 Verified information:
 {detected_objects}
 
-Give ONE short navigation instruction.
+Verified navigation decision:
+Direction: {navigation["direction"]}
+Urgency: {navigation["urgency"]}
+Reason: {navigation["reason"]}
+
+Give ONE short spoken navigation instruction.
 
 Rules:
-1. Do not invent objects.
-2. Do not invent exact distances.
-3. Do not mention confidence scores.
-4. Mention the most important detected object and its position naturally.
-5. For left, say "on the left".
-6. For center, say "ahead in the center".
-7. For right, say "on the right".
-8. Use simple language suitable for speech.
-9. Output ONLY one short sentence.
+1. Follow the verified navigation decision.
+2. Do not invent objects.
+3. Do not invent distances.
+4. Do not mention confidence scores.
+5. Do not contradict the navigation decision.
+6. Use simple language suitable for speech.
+7. Output ONLY one short sentence.
 
-Example:
-"A car is ahead on the right, so proceed carefully."
+Examples:
+"A person is on the left. Move right carefully."
+"A person is on the right. Move left carefully."
+"An obstacle is ahead. Stop and proceed carefully."
+"The path ahead is clear. Continue forward."
 """
+
+    # -----------------------------------
+    # 8. Send prompt to VLM
+    # -----------------------------------
 
     print("\nPrompt sent to VLM")
     print("-----------------------")
     print(prompt)
 
+    # -----------------------------------
+    # 9. Generate response
+    # -----------------------------------
+
     if not detections:
+
         response = (
             "No verified obstacle detected ahead. "
             "Proceed carefully."
         )
+
     else:
+
         response = ask_vlm(
-        image_path,
-        prompt
+            image_path,
+            prompt
         )
 
+        # -----------------------------------
+        # 10. Validate normal-scene response
+        # -----------------------------------
+
         if scene_info["scene_type"] == "normal":
+
             if not validate_vlm_response(
                 response,
                 detections,
                 image_width
             ):
+
                 position = get_object_position(
                     detections[0]["box"],
                     image_width
@@ -241,8 +308,10 @@ Example:
 
                 if position == "left":
                     position_text = "on the left"
+
                 elif position == "center":
                     position_text = "ahead in the center"
+
                 else:
                     position_text = "on the right"
 
@@ -251,6 +320,10 @@ Example:
                     f"{position_text}. Proceed carefully."
                 )
 
+    # -----------------------------------
+    # 11. Display final information
+    # -----------------------------------
+
     print("\nVerified YOLO Information")
     print("-----------------------")
     print(detected_objects)
@@ -258,5 +331,9 @@ Example:
     print("\nVisionAssist VLM Response")
     print("-----------------------")
     print(response)
+
+    # -----------------------------------
+    # 12. Speak response
+    # -----------------------------------
 
     speak(response)
